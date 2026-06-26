@@ -1,0 +1,22 @@
+# Datos generados en tiempo de ejecucion (videos/clips y bases de datos)
+datos/
+*.webm
+*.mp4
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Credenciales y secretos (usar .env.example como plantilla)
+.env
+
+# Config local del asistente / editor
+.claude/
+.vscode/
+
+# Backups y notas de trabajo
+config.zip
+server prmpt.txt

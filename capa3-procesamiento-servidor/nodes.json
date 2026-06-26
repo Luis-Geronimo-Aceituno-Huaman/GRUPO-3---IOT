@@ -1,0 +1,50 @@
+{
+  "esp32-01": {
+    "name": "Nodo SJL-01",
+    "lat": -11.962,
+    "lon": -77.0,
+    "district": "San Juan de Lurigancho"
+  },
+  "esp32-02": {
+    "name": "Nodo COM-01",
+    "lat": -11.949,
+    "lon": -77.061,
+    "district": "Comas"
+  },
+  "esp32-03": {
+    "name": "Nodo VES-01",
+    "lat": -12.213,
+    "lon": -76.937,
+    "district": "Villa El Salvador"
+  },
+  "esp32-04": {
+    "name": "Nodo CER-01",
+    "lat": -12.046,
+    "lon": -77.043,
+    "district": "Cercado de Lima"
+  },
+  "esp32-05": {
+    "name": "Nodo ATE-01",
+    "lat": -12.026,
+    "lon": -76.918,
+    "district": "Ate"
+  },
+  "esp32-06": {
+    "name": "Nodo LOS-01",
+    "lat": -12.0,
+    "lon": -77.083,
+    "district": "Los Olivos"
+  },
+  "esp32-07": {
+    "name": "Nodo CAR-01",
+    "lat": -11.897,
+    "lon": -77.033,
+    "district": "Carabayllo"
+  },
+  "esp32-08": {
+    "name": "Nodo LUR-01",
+    "lat": -12.274,
+    "lon": -76.872,
+    "district": "Lurín"
+  }
+}

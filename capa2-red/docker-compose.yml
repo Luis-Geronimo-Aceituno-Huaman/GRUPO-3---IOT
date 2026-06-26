@@ -1,0 +1,29 @@
+# docker-compose.yml — Broker MQTT (Capa 2) con autenticación.
+#
+# Reemplaza al viejo contenedor anónimo lanzado a mano con `docker run`. Ahora el
+# broker pide usuario/contraseña (passwd) y queda reproducible: el MISMO comando
+# levanta el broker en tu laptop y en la VM de la nube.
+#
+#   docker compose up -d        # levantar (en segundo plano)
+#   docker compose logs -f      # ver logs
+#   docker compose down         # detener
+#
+# Usuario por defecto: esp32 / iotmosquito2026  (cambialo con mosquitto_passwd,
+# ver el comentario en mosquitto.conf). La clave en claro NO vive aquí, solo su
+# hash en ./passwd.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto-iot
+    restart: unless-stopped
+    ports:
+      - "1883:1883"          # MQTT (en la nube: abrir también en el firewall de Oracle)
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./passwd:/mosquitto/config/passwd:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:

@@ -1,0 +1,4 @@
+paho-mqtt>=2.0
+opencv-python>=4.8.0   # vision por movimiento (MOG2 + flujo optico) + grabacion de clips
+numpy>=1.24.0
+python-dotenv          # opcional: leer sistema_integrado/.env

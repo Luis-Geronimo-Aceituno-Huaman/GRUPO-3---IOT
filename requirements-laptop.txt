@@ -1,0 +1,4 @@
+# Dependencias de la LAPTOP (solo expone la webcam como camara IP).
+# Lo unico que corre aca es capa3/cam_stream.py -> solo necesita OpenCV.
+# El detector, MQTT y el dashboard viven en la NUBE (ver requirements-nube.txt).
+opencv-python>=4.8.0
