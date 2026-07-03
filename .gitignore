@@ -16,7 +16,3 @@ venv/
 # Config local del asistente / editor
 .claude/
 .vscode/
-
-# Backups y notas de trabajo
-config.zip
-server prmpt.txt

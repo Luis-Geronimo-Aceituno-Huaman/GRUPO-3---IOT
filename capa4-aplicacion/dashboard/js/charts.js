@@ -13,17 +13,15 @@ Chart.defaults.borderColor = 'rgba(255,255,255,0.06)';
 
 let _chartByNode = null;
 let _chartByDay = null;
+let _chartByStatus = null;
 let _chartNodeDetail = null;
 
 function renderChartByNode() {
+  // Color de cada barra = NIVEL DE RIESGO del nodo (motor risk.py), no el conteo.
   const counts = alertCountsByNode();
   const labels = NODES.map(n => n.name);
   const data = NODES.map(n => counts[n.id] || 0);
-  const colors = data.map(c => {
-    const max = Math.max(1, ...data);
-    const r = c / max;
-    return r > 0.66 ? '#ff4d4f' : r > 0.33 ? '#faad14' : '#52c41a';
-  });
+  const colors = NODES.map(n => RISK_COLOR[n.riskLevel] || RISK_COLOR.bajo);
 
   const ctx = document.getElementById('chartByNode');
   if (_chartByNode) _chartByNode.destroy();
@@ -107,7 +105,37 @@ function renderChartNodeDetail(nodeId) {
   });
 }
 
+/** Distribución de alertas por estado del workflow (dona). */
+function renderChartByStatus() {
+  const ctx = document.getElementById('chartByStatus');
+  if (!ctx) return;
+  const counts = alertCountsByStatus();
+  const order = ['pendiente', 'en-revision', 'respondida', 'resuelta', 'falsa-alarma', 'descartada'];
+  const present = order.filter(s => counts[s]);
+  const palette = {
+    'pendiente': '#60a5fa', 'en-revision': '#fbbf24', 'respondida': '#2dd4bf',
+    'resuelta': '#34d399', 'falsa-alarma': '#8b94a8', 'descartada': '#5e6678',
+  };
+  if (_chartByStatus) _chartByStatus.destroy();
+  _chartByStatus = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: present.map(s => STATUS_LABEL[s] || s),
+      datasets: [{
+        data: present.map(s => counts[s]),
+        backgroundColor: present.map(s => palette[s]),
+        borderColor: 'rgba(0,0,0,0.25)', borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '62%',
+      plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } },
+    },
+  });
+}
+
 function renderAllCharts() {
   renderChartByNode();
   renderChartByDay();
+  renderChartByStatus();
 }

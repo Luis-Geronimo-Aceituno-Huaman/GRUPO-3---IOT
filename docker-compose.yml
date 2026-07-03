@@ -1,0 +1,58 @@
+# docker-compose.yml (RAÍZ) — Infraestructura del sistema: broker MQTT + PostgreSQL.
+#
+# Reemplaza (sin romperlo) al compose de capa2-red/: este orquesta TODO lo que corre
+# en contenedores. El broker reutiliza los MISMOS archivos de config de capa2-red/
+# (mosquitto.conf + passwd), así que da igual cuál de los dos compose uses para el
+# broker — pero postgres solo vive aquí.
+#
+#   docker compose up -d          # levantar broker + postgres
+#   docker compose ps             # estado (espera 'healthy' en postgres)
+#   docker compose logs -f        # logs
+#   docker compose down           # detener (los datos persisten en volúmenes)
+#
+# El schema (capa3-procesamiento-servidor/database/schema.sql) se aplica solo en el
+# PRIMER arranque (volumen pgdata vacío). Para BDs ya inicializadas, el migrador
+# (database/migrate_sqlite_to_pg.py) lo re-aplica de forma idempotente.
+#
+# Credenciales: vienen del .env de la raíz (PG_USER/PG_PASS/PG_DB). Los defaults de
+# abajo solo aplican si el .env no las define.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto-iot
+    restart: unless-stopped
+    ports:
+      - "1883:1883"          # MQTT (en la nube: abrir también en el firewall de Oracle)
+    volumes:
+      - ./capa2-red/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./capa2-red/passwd:/mosquitto/config/passwd:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pg-iot
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-iot}
+      POSTGRES_PASSWORD: ${PG_PASS:-iotmosquito2026}
+      POSTGRES_DB: ${PG_DB:-iot_mosquito}
+    ports:
+      # SOLO localhost: la BD nunca se expone a internet. Host 5433 porque el 5432
+      # de esta laptop lo ocupa el postgres de otro proyecto (papascan-db); dentro
+      # del contenedor sigue siendo 5432. En la VM limpia podría volver a 5432
+      # (ajustar PG_PORT en .env).
+      - "127.0.0.1:${PG_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./capa3-procesamiento-servidor/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-iot} -d ${PG_DB:-iot_mosquito}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+  pgdata:

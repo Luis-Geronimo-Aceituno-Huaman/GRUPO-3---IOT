@@ -41,7 +41,7 @@ def load_nodes() -> dict:
 class Gateway:
     def __init__(self):
         self.nodes = load_nodes()
-        self.store = AlertStore(cfg.DB_PATH)
+        self.store = None          # AlertStore (PostgreSQL); se abre con _get_store()
         self.cache = {}
         self.gate = None
 
@@ -51,10 +51,32 @@ class Gateway:
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
+    def _get_store(self, retries: int = 5) -> AlertStore | None:
+        """AlertStore sobre PostgreSQL, con reintento y backoff exponencial.
+        Se llama desde los hilos de clip (NO desde el hilo de red MQTT), así que
+        esperar aquí no bloquea la recepción de mensajes. Devuelve None si PG
+        sigue caído tras los reintentos (la alerta se pierde con un log claro)."""
+        if self.store is not None:
+            return self.store
+        wait = 1.0
+        for intento in range(1, retries + 1):
+            try:
+                self.store = AlertStore()
+                print("[GATEWAY] Conectado a PostgreSQL.")
+                return self.store
+            except Exception as e:
+                print(f"[GATEWAY] PostgreSQL no responde (intento {intento}/{retries}): {e}")
+                time.sleep(wait)
+                wait = min(wait * 2, 30)
+        return None
+
     def run(self):
         mode = "SIMULACION (sin analisis real)" if SIM else "REAL (vision por movimiento + broker)"
         print(f"[GATEWAY] Iniciando en modo {mode}")
-        print(f"[GATEWAY] Broker {cfg.MQTT_HOST}:{cfg.MQTT_PORT}  -  BD {cfg.DB_PATH}")
+        from database import PG_HOST, PG_PORT, PG_DB
+        print(f"[GATEWAY] Broker {cfg.MQTT_HOST}:{cfg.MQTT_PORT}  -  "
+              f"BD postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}")
+        self._get_store(retries=1)     # intento temprano (no fatal si PG aún no está)
         self._start_upload_server()
         self.client.connect(cfg.MQTT_HOST, cfg.MQTT_PORT, keepalive=60)
         self.client.loop_forever()
@@ -186,8 +208,13 @@ class Gateway:
             print(f"[GATEWAY] DESCARTADO: sin movimiento tipo mosquito. No se guarda en BD ({device}).")
             return
 
+        store = self._get_store()
+        if store is None:
+            print(f"[GATEWAY] PERDIDA: PostgreSQL caído, no se pudo guardar la alerta de {device}.")
+            return
+
         alert = self.build_alert(device, video, verdict)
-        new_id = self.store.insert_alert(alert)
+        new_id = store.insert_alert(alert)
         top = verdict["top_class"]
         conf = verdict["max_confidence"]
         print(f"[GATEWAY] GUARDADO en BD (id={new_id}): {top} conf={conf} - {alert['district']}")
@@ -232,7 +259,16 @@ class Gateway:
         sensors_msg = c.get("sensors", {})
         status_msg = c.get("status", {}) or {}
 
+        # Nivel de riesgo del nodo EN EL MOMENTO de la alerta (queda estampado).
+        risk_level = None
+        try:
+            import risk
+            _, risk_level, _ = risk.evaluate_node(device, sensores=sensors_msg)
+        except Exception as e:
+            print(f"[GATEWAY] riesgo no calculado para {device}: {e}")
+
         return {
+            "riskLevel": risk_level,
             "nodeId": device,
             "nodeName": node.get("name", device),
             "district": node.get("district", "desconocido"),
@@ -244,10 +280,15 @@ class Gateway:
             "detClass": verdict["top_class"],
             "detCount": verdict["total_detections"],
             "videoUrl": video,
-            "status": "nueva",
+            "status": "pendiente",
             "sensors": {
                 "temp_c": sensors_msg.get("temp_c"),
                 "turb_v": sensors_msg.get("turb_v"),
+                # Campos ADITIVOS: el ESP32 real no los manda (quedan None); el
+                # simulador y nodos futuros sí. El protocolo no cambia.
+                "humedad": sensors_msg.get("humedad"),
+                "ph": sensors_msg.get("ph"),
+                "nivel_agua": sensors_msg.get("nivel_agua"),
                 "audio_rms": status_msg.get("audio_rms") or sensors_msg.get("audio_rms"),
                 "audio_peak": sensors_msg.get("audio_peak"),
                 "sats": gps.get("sats"),

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Simulador de nodo ESP32 — pruebas</title>
+<style>
+  :root {
+    --bg:#0a0d14; --surface:#151a25; --surface2:#1b212e; --inset:#0f131c;
+    --line:rgba(255,255,255,.08); --fg:#e9edf5; --muted:#8b94a8;
+    --accent:#2dd4bf; --blue:#60a5fa; --red:#f5616e; --yellow:#fbbf24; --green:#34d399;
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.5 "Segoe UI",system-ui,sans-serif; padding:24px; }
+  h1 { font-size:20px; display:flex; align-items:center; gap:10px; }
+  h1 .tag { font-size:10px; background:rgba(96,165,250,.15); color:var(--blue);
+            border:1px dashed rgba(96,165,250,.4); padding:2px 8px; border-radius:6px; letter-spacing:1px; }
+  .sub { color:var(--muted); font-size:12.5px; margin:4px 0 18px; }
+  .tabs { display:flex; gap:8px; margin-bottom:18px; }
+  .tabs button { background:var(--surface2); color:var(--muted); border:1px solid var(--line);
+                 padding:9px 18px; border-radius:10px; cursor:pointer; font-size:13.5px; }
+  .tabs button.active { background:rgba(45,212,191,.12); color:var(--accent); border-color:rgba(45,212,191,.4); }
+  .panel { display:none; } .panel.active { display:block; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:900px){ .grid{grid-template-columns:1fr} }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:20px; }
+  .card h2 { font-size:14px; margin-bottom:14px; color:var(--accent); }
+  label.row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:9px 0; font-size:13px; }
+  label.row .val { color:var(--accent); min-width:64px; text-align:right; font-variant-numeric:tabular-nums; }
+  input[type=range] { flex:1; accent-color:var(--accent); }
+  input[type=text], input[type=number], select {
+    background:var(--inset); border:1px solid var(--line); color:var(--fg);
+    border-radius:8px; padding:8px 10px; font:inherit; }
+  input[type=checkbox]{ accent-color:var(--accent); transform:scale(1.15); }
+  .btn { background:var(--surface2); border:1px solid var(--line); color:var(--fg);
+         padding:10px 16px; border-radius:10px; cursor:pointer; font-size:13.5px; }
+  .btn.accent { background:rgba(45,212,191,.14); color:var(--accent); border-color:rgba(45,212,191,.4); }
+  .btn.danger { color:var(--red); border-color:rgba(245,97,110,.4); }
+  .btn.big { width:100%; padding:13px; font-size:15px; margin-top:12px; }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  #log { background:var(--inset); border:1px solid var(--line); border-radius:10px;
+         padding:12px; height:260px; overflow-y:auto; font:12px/1.6 ui-monospace,monospace;
+         color:var(--muted); white-space:pre-wrap; }
+  .status-dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--red); margin-right:6px; }
+  .status-dot.on { background:var(--green); box-shadow:0 0 8px rgba(52,211,153,.6); }
+  .hint { color:var(--muted); font-size:11.5px; margin-top:6px; }
+  .field-2 { display:flex; gap:10px; } .field-2 > * { flex:1; }
+  .ok-msg { color:var(--green); font-size:13px; margin-top:10px; min-height:18px; }
+</style>
+</head>
+<body>
+
+<h1>🦟 Simulador de nodo ESP32 <span class="tag">HERRAMIENTA DE PRUEBAS</span></h1>
+<p class="sub" id="broker-info">Publica el protocolo MQTT/upload EXACTO del firmware — el backend no distingue este simulador de un ESP32 real.</p>
+
+<div class="tabs">
+  <button id="tabbtn-sim" class="active" onclick="showTab('sim')">📡 Simulador de nodo (MQTT)</button>
+  <button id="tabbtn-gen" onclick="showTab('gen')">🧪 Alertas sintéticas (BD directa)</button>
+</div>
+
+<!-- ==================== PESTAÑA 1: SIMULADOR ==================== -->
+<div id="panel-sim" class="panel active">
+  <div class="grid">
+    <div class="card">
+      <h2><span id="simDot" class="status-dot"></span>Nodo virtual</h2>
+
+      <label class="row">ID del nodo
+        <input type="text" id="nodeId" value="esp32-99" style="width:150px" />
+      </label>
+
+      <label class="row">🌡️ Temperatura <span class="val" id="v-temp">26.0 °C</span></label>
+      <input type="range" id="c-temp" min="10" max="45" step="0.5" value="26" style="width:100%" />
+
+      <label class="row">💧 Turbidez <span class="val" id="v-turb">1.00 V</span></label>
+      <input type="range" id="c-turb" min="0" max="3.3" step="0.05" value="1.0" style="width:100%" />
+
+      <label class="row">💦 Humedad <span class="val" id="v-hum">off</span></label>
+      <input type="range" id="c-hum" min="0" max="100" step="1" value="0" style="width:100%" />
+      <div class="hint">en 0 = el nodo NO tiene sensor de humedad (como el ESP32 real)</div>
+
+      <label class="row">⚗️ pH <span class="val" id="v-ph">off</span></label>
+      <input type="range" id="c-ph" min="0" max="14" step="0.1" value="0" style="width:100%" />
+
+      <label class="row">🌊 Nivel de agua <span class="val" id="v-nivel">off</span></label>
+      <input type="range" id="c-nivel" min="0" max="20" step="0.5" value="0" style="width:100%" />
+
+      <label class="row">🎯 Confianza TinyML <span class="val" id="v-conf">0.85</span></label>
+      <input type="range" id="c-conf" min="0.3" max="1" step="0.01" value="0.85" style="width:100%" />
+
+      <label class="row">🦟 Nº de mosquitos en el video <span class="val" id="v-mosq">1</span></label>
+      <input type="range" id="c-mosq" min="0" max="15" step="1" value="1" style="width:100%" />
+
+      <label class="row">🎥 Subir video sintético al disparar
+        <input type="checkbox" id="c-video" checked /></label>
+      <label class="row">🪰 Movimiento real en el video (off = clip vacío → el detector debe DESCARTAR)
+        <input type="checkbox" id="c-mov" checked /></label>
+
+      <label class="row">⏱ Modo AUTO: disparar cada (s, 0 = manual)
+        <input type="number" id="c-intervalo" min="0" max="3600" value="0" style="width:90px" /></label>
+      <label class="row">💓 Heartbeat cada (s)
+        <input type="number" id="c-hb" min="5" max="600" value="60" style="width:90px" /></label>
+
+      <div class="field-2">
+        <label class="row">📍 lat <input type="number" id="c-lat" step="0.0001" value="-12.046" style="width:120px" /></label>
+        <label class="row">lon <input type="number" id="c-lon" step="0.0001" value="-77.043" style="width:120px" /></label>
+        <label class="row">🛰️ sats <input type="number" id="c-sats" min="0" max="20" value="7" style="width:70px" /></label>
+      </div>
+
+      <div class="actions">
+        <button class="btn accent" id="btnStart" onclick="startNode()">▶ Iniciar nodo</button>
+        <button class="btn danger" id="btnStop" onclick="stopNode()" disabled>■ Detener</button>
+        <button class="btn" id="btnTrigger" onclick="triggerAlert()" disabled>🚨 Disparar alerta</button>
+      </div>
+      <div class="hint">Flujo real: alert (QoS1) → sensors/gps/audio/status → ráfaga jpegseq al gateway :8090 → detector → BD → dashboard.</div>
+    </div>
+
+    <div class="card">
+      <h2>📜 Registro</h2>
+      <div id="log">esperando…</div>
+      <div class="hint">Los cambios de sliders se aplican en vivo al nodo corriendo.
+        Probá también los comandos desde el dashboard (pestaña Estado → 💓 Pedir heartbeat).</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PESTAÑA 2: SINTÉTICAS ==================== -->
+<div id="panel-gen" class="panel">
+  <div class="grid">
+    <div class="card">
+      <h2>🧪 Generar alertas sintéticas (sin video, directo a la BD)</h2>
+
+      <label class="row">Nodo
+        <select id="g-node" style="min-width:180px"></select>
+      </label>
+      <label class="row">Cantidad <span class="val" id="v-gcount">10</span></label>
+      <input type="range" id="g-count" min="1" max="100" value="10" style="width:100%" />
+
+      <label class="row">Repartidas en los últimos (días) <span class="val" id="v-gdays">7</span></label>
+      <input type="range" id="g-days" min="0" max="30" value="7" style="width:100%" />
+
+      <label class="row">Estado inicial
+        <select id="g-status">
+          <option value="pendiente">Pendiente</option>
+          <option value="en-revision">En revisión</option>
+          <option value="respondida">Respondida</option>
+          <option value="resuelta">Resuelta</option>
+          <option value="falsa-alarma">Falsa alarma (no sale en el mapa)</option>
+          <option value="descartada">Descartada (no sale en el mapa)</option>
+        </select>
+      </label>
+
+      <h2 style="margin-top:16px">Datos de sensores de las alertas</h2>
+      <label class="row">🌡️ Temperatura <span class="val" id="v-gtemp">28 °C</span></label>
+      <input type="range" id="g-temp" min="10" max="45" step="0.5" value="28" style="width:100%" />
+      <label class="row">💧 Turbidez <span class="val" id="v-gturb">2.20 V</span></label>
+      <input type="range" id="g-turb" min="0" max="3.3" step="0.05" value="2.2" style="width:100%" />
+      <label class="row">💦 Humedad (0 = sin sensor) <span class="val" id="v-ghum">70 %</span></label>
+      <input type="range" id="g-hum" min="0" max="100" value="70" style="width:100%" />
+
+      <button class="btn accent big" onclick="generate()">⚡ Generar</button>
+      <div class="ok-msg" id="g-result"></div>
+      <div class="hint">Se insertan con is_synthetic=TRUE (el dashboard puede filtrarlas con
+        ?include_synthetic=0). El nivel de riesgo se calcula con estos sensores.</div>
+    </div>
+
+    <div class="card">
+      <h2>ℹ️ Para qué sirve</h2>
+      <p class="sub" style="margin-top:0">
+        Pobla el dashboard y el mapa con datos de prueba SIN hardware, SIN video y
+        SIN pasar por el detector: ideal para probar el flujo de atención de
+        alertas, el mapa de calor, los KPIs y los niveles de riesgo.<br><br>
+        Para probar el pipeline COMPLETO (detector de visión incluido), usá la
+        pestaña «Simulador de nodo»: ese sí sube ráfagas jpegseq reales al gateway.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+let running = null;   // node_id corriendo (esta UI maneja 1 a la vez)
+
+function showTab(t) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + t).classList.add('active');
+  document.getElementById('tabbtn-' + t).classList.add('active');
+  if (t === 'gen') loadDbNodes();
+}
+
+/* ------- sliders: etiquetas en vivo + push de config al nodo ------- */
+const fmt = {
+  temp: v => (+v).toFixed(1) + ' °C', turb: v => (+v).toFixed(2) + ' V',
+  hum: v => +v ? v + ' %' : 'off', ph: v => +v ? (+v).toFixed(1) : 'off',
+  nivel: v => +v ? v + ' cm' : 'off', conf: v => (+v).toFixed(2), mosq: v => v,
+};
+for (const k of ['temp','turb','hum','ph','nivel','conf','mosq']) {
+  const inp = document.getElementById('c-' + k);
+  inp.addEventListener('input', () => {
+    document.getElementById('v-' + k).textContent = fmt[k](inp.value);
+    pushConf();
+  });
+}
+for (const k of ['video','mov','intervalo','hb','lat','lon','sats']) {
+  document.getElementById('c-' + k).addEventListener('change', pushConf);
+}
+
+function currentConf() {
+  const g = id => document.getElementById(id);
+  return {
+    temp_c: +g('c-temp').value,
+    turb_v: +g('c-turb').value,
+    humedad: +g('c-hum').value || null,
+    ph: +g('c-ph').value || null,
+    nivel_agua: +g('c-nivel').value || null,
+    confidence: +g('c-conf').value,
+    n_mosquitos: +g('c-mosq').value,
+    auto_video: g('c-video').checked,
+    movimiento: g('c-mov').checked,
+    intervalo_s: +g('c-intervalo').value,
+    heartbeat_s: +g('c-hb').value,
+    lat: +g('c-lat').value, lon: +g('c-lon').value, sats: +g('c-sats').value,
+  };
+}
+
+async function pushConf() {
+  if (!running) return;
+  await fetch('/api/node/update', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ node_id: running, conf: currentConf() }),
+  }).catch(() => {});
+}
+
+/* ------- ciclo del nodo ------- */
+async function startNode() {
+  const nodeId = document.getElementById('nodeId').value.trim() || 'esp32-99';
+  const res = await fetch('/api/node/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ node_id: nodeId, conf: currentConf() }),
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'error'); return; }
+  running = nodeId;
+  setRunning(true);
+}
+
+async function stopNode() {
+  if (!running) return;
+  await fetch('/api/node/stop', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ node_id: running }),
+  });
+  running = null;
+  setRunning(false);
+}
+
+async function triggerAlert() {
+  if (!running) return;
+  await fetch('/api/node/trigger', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ node_id: running }),
+  });
+}
+
+function setRunning(on) {
+  document.getElementById('simDot').classList.toggle('on', on);
+  document.getElementById('btnStart').disabled = on;
+  document.getElementById('btnStop').disabled = !on;
+  document.getElementById('btnTrigger').disabled = !on;
+  document.getElementById('nodeId').disabled = on;
+}
+
+/* ------- log en vivo ------- */
+async function poll() {
+  try {
+    const st = await (await fetch('/api/state')).json();
+    document.getElementById('broker-info').textContent =
+      `broker ${st.broker} · gateway ${st.gateway} — protocolo idéntico al firmware.`;
+    document.getElementById('log').textContent = st.log.join('\n') || 'sin actividad aún…';
+    const el = document.getElementById('log'); el.scrollTop = el.scrollHeight;
+    // reflejar si nuestro nodo sigue vivo (p.ej. si se reinició el server)
+    if (running && !(running in st.nodes)) { running = null; setRunning(false); }
+  } catch (e) { /* server caído: reintenta */ }
+}
+setInterval(poll, 2000); poll();
+
+/* ------- pestaña sintéticas ------- */
+for (const [id, out, f] of [['g-count','v-gcount', v=>v], ['g-days','v-gdays', v=>v],
+                            ['g-temp','v-gtemp', v=>v+' °C'], ['g-turb','v-gturb', v=>(+v).toFixed(2)+' V'],
+                            ['g-hum','v-ghum', v=>+v ? v+' %' : 'off']]) {
+  const inp = document.getElementById(id);
+  inp.addEventListener('input', () => document.getElementById(out).textContent = f(inp.value));
+}
+
+async function loadDbNodes() {
+  try {
+    const nodes = await (await fetch('/api/db-nodes')).json();
+    const sel = document.getElementById('g-node');
+    sel.innerHTML = nodes.map(n =>
+      `<option value="${n.node_id}">${n.node_id}${n.is_simulated ? ' (sim)' : ''}</option>`).join('')
+      || '<option value="esp32-99">esp32-99</option>';
+  } catch (e) {}
+}
+
+async function generate() {
+  const g = id => document.getElementById(id);
+  const res = await fetch('/api/synthetic', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      node_id: g('g-node').value,
+      count: +g('g-count').value,
+      days: +g('g-days').value,
+      status: g('g-status').value,
+      sensors: {
+        temp_c: +g('g-temp').value,
+        turb_v: +g('g-turb').value,
+        humedad: +g('g-hum').value || null,
+      },
+    }),
+  });
+  const data = await res.json();
+  document.getElementById('g-result').textContent = res.ok
+    ? `✓ ${data.created} alerta(s) creadas — refrescá el dashboard`
+    : '✗ ' + (data.error || 'error');
+}
+</script>
+</body>
+</html>

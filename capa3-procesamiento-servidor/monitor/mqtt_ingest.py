@@ -94,8 +94,10 @@ class MqttIngest:
                 self._handle_node_status(node, payload)
             elif topic.endswith("/sensors"):
                 self.cache.setdefault(node, {})["sensors"] = payload
+                self._handle_sensors(node, payload)
             elif topic.endswith("/gps"):
                 self.cache.setdefault(node, {})["gps"] = payload
+                self._handle_gps(node, payload)
             elif topic.endswith("/audio"):
                 self.cache.setdefault(node, {})["audio"] = payload
         except Exception as e:
@@ -147,6 +149,30 @@ class MqttIngest:
         # ignora salvo que quieras extender la tabla nodes. Se deja como cache.
         else:
             self.cache.setdefault(node, {})["status"] = p
+
+    def _handle_sensors(self, node, p):
+        """devices/<id>/sensors -> tabla sensor_readings (histórico para el motor
+        de riesgo) + nodes.last_reading. Aditivo: el ESP32 real manda turb_raw/
+        turb_v/temp_c; humedad/ph/nivel_agua vienen del simulador o nodos futuros
+        (caen en columnas propias) y cualquier clave desconocida va a extra JSONB."""
+        try:
+            audio = self.cache.get(node, {}).get("audio", {})
+            reading = dict(p)
+            if audio.get("mosquito_conf") is not None:
+                reading.setdefault("audio_conf", audio.get("mosquito_conf"))
+            self.db.insert_reading(node, reading)
+        except Exception as e:
+            print(f"[SEN] {node}: no se pudo guardar la lectura: {e}")
+
+    def _handle_gps(self, node, p):
+        """devices/<id>/gps -> posición del nodo en la tabla nodes (solo con fix:
+        el firmware solo publica si g_gpsFix, pero validamos igual)."""
+        lat, lon = p.get("lat"), p.get("lon")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            try:
+                self.db.update_node_fields(node, lat=lat, lon=lon, alt=p.get("alt"))
+            except Exception as e:
+                print(f"[GPS] {node}: no se pudo actualizar posición: {e}")
 
     def _handle_node_status(self, node, p):
         """nodes/<name>/status: eventos de self_monitor (reservado en el firmware).

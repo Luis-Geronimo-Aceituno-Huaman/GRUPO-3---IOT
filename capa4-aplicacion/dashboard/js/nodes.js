@@ -14,10 +14,9 @@
  */
 
 /* ------------------------------ helpers ------------------------------ */
+/* fetchJSON (data.js) maneja la sesión: un 401 redirige a login.html. */
 async function _getJSON(url) {
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+  return fetchJSON(url);
 }
 
 function _isoRel(iso) {
@@ -95,10 +94,15 @@ async function renderNodesTab() {
     }
     grid.innerHTML = nodes.map(n => `
       <div class="node-card st-${n.status || 'UNKNOWN'}" onclick="openNodeMonitorDetail('${_esc(n.node_name)}')">
-        <h3>${_esc(n.node_name)} ${_statusBadge(n.status)}</h3>
+        <h3>${_esc(n.node_name)} ${_statusBadge(n.status)}
+            ${n.is_simulated ? '<span class="sim-tag">SIM</span>' : ''}</h3>
+        <div class="node-kv"><span>Riesgo</span><span>${riskBadge(n.risk_level, n.risk_score)}</span></div>
+        <div class="node-kv"><span>Alertas</span><span>${n.alert_visible ?? 0} activas · ${n.alert_count ?? 0} total</span></div>
+        <div class="node-kv"><span>Sensores</span><span class="sensors-inline">${(n.sensors_installed || []).join(', ') || '—'}</span></div>
         <div class="node-kv"><span>Batería</span><span>${_battery(n.battery_pct)}</span></div>
         <div class="node-kv"><span>Temp chip</span><span>${_temp(n.chip_temp_c)}</span></div>
         <div class="node-kv"><span>Último heartbeat</span><span>${_isoRel(n.last_heartbeat)}</span></div>
+        <div class="node-kv"><span>Última lectura</span><span>${_isoRel(n.last_reading)}</span></div>
         <div class="node-kv"><span>Umbral</span><span>${n.threshold ?? '—'}</span></div>
         <div class="node-actions">
           <button class="btn-sm accent" onclick="event.stopPropagation(); recalibrateNode('${_esc(n.node_name)}')">🎚 Recalibrar</button>
@@ -131,13 +135,14 @@ async function renderStatusTab() {
   try {
     const nodes = await _getJSON('/api/nodes');
     if (!nodes.length) {
-      body.innerHTML = '<tr class="empty-row"><td colspan="7">No hay nodos registrados.</td></tr>';
+      body.innerHTML = '<tr class="empty-row"><td colspan="8">No hay nodos registrados.</td></tr>';
       return;
     }
     body.innerHTML = nodes.map(n => `
       <tr onclick="openNodeMonitorDetail('${_esc(n.node_name)}')" style="cursor:pointer">
         <td>${_esc(n.node_name)}</td>
         <td>${_statusBadge(n.status)}</td>
+        <td>${riskBadge(n.risk_level, n.risk_score)}</td>
         <td>${_isoShort(n.last_heartbeat)}<div class="muted small">${_isoRel(n.last_heartbeat)}</div></td>
         <td>${_battery(n.battery_pct)}</td>
         <td>${_temp(n.chip_temp_c)}</td>
@@ -145,7 +150,7 @@ async function renderStatusTab() {
         <td><button class="btn-sm" onclick="event.stopPropagation(); requestHeartbeat('${_esc(n.node_name)}')">💓 Pedir heartbeat</button></td>
       </tr>`).join('');
   } catch (e) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="7">Error: ${_esc(e.message)}</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="8">Error: ${_esc(e.message)}</td></tr>`;
   }
 }
 
@@ -340,8 +345,10 @@ function switchTab(name) {
   if (_statusTimer) { clearInterval(_statusTimer); _statusTimer = null; }
 
   if (name === 'nodos') renderNodesTab();
+  else if (name === 'atencion') renderAttentionQueue();
   else if (name === 'estado') { renderStatusTab(); _statusTimer = setInterval(renderStatusTab, 60000); }
   else if (name === 'videos') renderVideosTab();
+  else if (name === 'admin' && typeof renderAdminTab === 'function') renderAdminTab();
   // 'resumen' y 'detecciones' los pinta app.js al cargar (KPIs/gráficos/tabla)
 
   // el mapa vive en su propia pestaña; Leaflet necesita recalcular tamaño al mostrarse
@@ -370,7 +377,7 @@ function initNodesTabs() {
   loadInitialCounts();
 
   // deep-link: abrir la pestaña indicada en la URL (#mapa/#detecciones/#nodos…)
-  const TABS = ['resumen', 'mapa', 'detecciones', 'nodos', 'estado', 'videos'];
+  const TABS = ['resumen', 'mapa', 'detecciones', 'atencion', 'nodos', 'estado', 'videos', 'admin'];
   const initial = (location.hash || '').replace('#', '');
   if (TABS.includes(initial) && initial !== 'resumen') switchTab(initial);
   // soportar navegación atrás/adelante del navegador

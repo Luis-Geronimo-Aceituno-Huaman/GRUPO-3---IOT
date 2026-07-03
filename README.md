@@ -58,8 +58,8 @@ mosquito y reporta `Mosquito` · `Mosquito Swarm` (enjambre).
 sistema_integrado/
 ├── README.md                          ← este archivo
 ├── DESPLIEGUE.md                       ← cómo se parte en laptop + nube
-├── run_laptop.sh                       ← laptop: expone la webcam como cámara IP (:8091)
-├── run_nube.sh                         ← servidor: gateway + dashboard (broker, detector, BD)
+├── iniciar.sh                          ← lanzador ÚNICO: Docker (broker+BD) + gateway + dashboard + cámara
+├── docker-compose.yml                  ← infraestructura: broker Mosquitto + PostgreSQL
 │
 ├── capa1-percepcion-dispositivo/
 │   └── nodo_iot/{nodo_iot.ino, config.h}   ← firmware ESP32 (TinyML calibrado + sensores + alerta)
@@ -77,25 +77,24 @@ sistema_integrado/
 │   ├── serve.py             ← API /api/alerts + sirve el dashboard
 │   └── dashboard/           ← web (mapa, tabla, gráficos)
 │
-└── datos/                   ← (runtime) clips grabados y alerts.db
+└── datos/                   ← (runtime) clips grabados (la BD vive en PostgreSQL/Docker)
 ```
 
 ---
 
-## Cómo correr (laptop + servidor)
+## Cómo correr
 
-El sistema se parte en dos lanzadores (el detalle del despliegue en la nube está en
-[`DESPLIEGUE.md`](DESPLIEGUE.md)). Necesitas **Python 3** y un broker **Mosquitto** en
-`localhost:1883` (`cd capa2-red && docker compose up -d`).
+Un solo lanzador levanta TODO en orden: Docker (broker Mosquitto + PostgreSQL),
+las semillas de la BD la primera vez, el gateway con el detector, el dashboard y
+la cámara (el detalle del despliegue en la nube está en [`DESPLIEGUE.md`](DESPLIEGUE.md)).
+Necesitas **Docker + docker compose** y **Python 3** con `pip install -r requirements-nube.txt`.
 
 ```bash
-# LAPTOP — expone la webcam como cámara IP (:8091) por mDNS, para que el ESP32 jale la ráfaga
-pip install -r requirements-laptop.txt    # solo OpenCV
-bash run_laptop.sh
-
-# SERVIDOR (laptop misma o nube) — gateway (:8090) + detector + BD + dashboard (:8000)
-pip install -r requirements-nube.txt
-bash run_nube.sh
+cp .env.example .env          # solo la primera vez: completar credenciales
+./iniciar.sh                  # LOCAL: infra Docker + gateway + dashboard + cámara
+./iniciar.sh --simulador      # ídem + simulador de nodo ESP32 (:8200)
+./iniciar.sh nube             # en la VM: infra + gateway + dashboard (sin cámara)
+./iniciar.sh laptop           # en la laptop cuando el server vive en la nube (solo cámara)
 ```
 
 Abre **http://localhost:8000** → las alertas confirmadas aparecen en el dashboard.

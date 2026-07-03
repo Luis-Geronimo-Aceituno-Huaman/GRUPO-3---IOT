@@ -4,16 +4,21 @@ El **broker Mosquitto** es la "central telefónica" que reparte los mensajes ent
 nodo (Capa 1), la cámara, el gateway (Capa 3) y el dashboard (Capa 4).
 
 - Contrato de tópicos: **[MQTT_SPEC.md](MQTT_SPEC.md)**.
-- Configuración del broker: **[mosquitto.conf](mosquitto.conf)** (demo local, `localhost:1883`, anónimo).
+- Configuración del broker: **[mosquitto.conf](mosquitto.conf)** (`:1883`, con
+  usuario/clave del archivo [passwd](passwd) — `allow_anonymous false`).
 
 ## Levantar el broker
 
-**Windows** (con Mosquitto instalado):
-```powershell
-mosquitto -c mosquitto.conf -v
+El broker corre en **Docker** con el `docker-compose.yml` de la **raíz** del
+proyecto (un solo compose orquesta broker + PostgreSQL); monta `mosquitto.conf`
+y `passwd` de esta carpeta:
+
+```bash
+# desde la raíz del proyecto (o directamente ./iniciar.sh, que hace esto y más)
+docker compose up -d mosquitto
 ```
 
-**Linux**:
+Alternativa sin Docker (con Mosquitto instalado en el sistema):
 ```bash
 mosquitto -c mosquitto.conf -v
 ```

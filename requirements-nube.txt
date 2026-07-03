@@ -1,8 +1,12 @@
 # Dependencias de la NUBE (VM Oracle): gateway + detector + dashboard + monitor.
-# Capas 3 y 4. El broker mosquitto (capa 2) se instala aparte con apt, no con pip.
+# Capas 3 y 4. El broker mosquitto y PostgreSQL (capa 2 / datos) corren en Docker
+# (docker-compose.yml de la raíz), no con pip.
 paho-mqtt>=2.0
 opencv-python>=4.8.0   # vision por movimiento (MOG2 + flujo optico) que corre el detector
 numpy>=1.24.0
-python-dotenv          # leer el .env con MQTT_USER/MQTT_PASS/etc.
+python-dotenv          # leer el .env con MQTT_USER/MQTT_PASS/PG_*/etc.
 fastapi>=0.110         # capa 4: dashboard/API (serve.py, ASGI)
 uvicorn>=0.27          # capa 4: servidor ASGI que sirve FastAPI
+psycopg[binary,pool]>=3.1   # PostgreSQL: pool compartido de capas 3 y 4 (database.py)
+bcrypt>=4.0            # hash de contraseñas (auth.py del dashboard)
+itsdangerous>=2.1      # firma de la cookie de sesión (auth.py)

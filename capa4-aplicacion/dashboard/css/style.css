@@ -185,7 +185,7 @@ a:hover { color: #5eead4; text-decoration: underline; }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #1f2533; color: var(--fg); }
 
 /* ---------------- Gráficos ---------------- */
-.charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
 .chart-box { height: 175px; margin-bottom: 16px; }
 .chart-box.tall { height: 320px; margin-bottom: 0; }
 
@@ -210,9 +210,18 @@ a:hover { color: #5eead4; text-decoration: underline; }
 .dot.falso-positivo { background: var(--muted); }
 .dot.fumigacion { background: var(--yellow); }
 
-.sensors { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
-.sensors span { white-space: nowrap; }
+/* La celda de sensores debe seguir siendo table-cell: aplicar display:flex al
+ * <td> lo saca del layout de tabla y las columnas se ven desalineadas entre
+ * filas. El flex vive en el contenedor interno .sensor-chips. */
+.sensors { color: var(--muted); font-size: 13px; }
+.sensor-chips { display: flex; gap: 6px 14px; flex-wrap: wrap; align-items: center; }
+.sensor-chips span { white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; }
 .sensors .na { color: var(--faint); font-style: normal; opacity: .8; }
+
+/* Celda "Nodo / Ubicación" de la cola de atención: datos para llegar al nodo. */
+.loc-cell { display: grid; gap: 2px; min-width: 190px; }
+.loc-links { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.btn-link { text-decoration: none; display: inline-flex; align-items: center; }
 
 /* badges de confianza / fuente / estado (tabla de alertas) */
 .conf { padding: 3px 10px; border-radius: 7px; font-weight: 700; font-size: 12px; }
@@ -315,6 +324,77 @@ th[data-sort]:hover { color: var(--fg); }
 .form-input:focus { outline: none; box-shadow: var(--ring); border-color: transparent; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
+/* ==================== AMPLIACIÓN: workflow + riesgo + auth ==================== */
+
+/* pills de los 6 estados del workflow (reemplazan a nueva/atendida/...) */
+.status-pill.pendiente      { background: rgba(96,165,250,.16);  color: var(--blue); }
+.status-pill.en-revision    { background: rgba(251,191,36,.16);  color: var(--yellow); }
+.status-pill.respondida     { background: rgba(45,212,191,.16);  color: var(--accent); }
+.status-pill.resuelta       { background: rgba(52,211,153,.16);  color: var(--green); }
+.status-pill.falsa-alarma   { background: rgba(139,148,168,.16); color: var(--muted); }
+.status-pill.descartada     { background: rgba(94,102,120,.18);  color: var(--faint); text-decoration: line-through; }
+
+/* badge de nivel de riesgo (motor risk.py): 🟢🟡🟠🔴 */
+.risk-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 650; white-space: nowrap; }
+.risk-badge.bajo    { background: rgba(52,211,153,.14);  color: var(--green); }
+.risk-badge.medio   { background: rgba(251,191,36,.14);  color: var(--yellow); }
+.risk-badge.alto    { background: rgba(251,146,60,.16);  color: var(--orange); }
+.risk-badge.critico { background: rgba(245,97,110,.18);  color: var(--red); box-shadow: 0 0 10px rgba(245,97,110,.25); }
+
+/* etiqueta de nodo/alerta simulada */
+.sim-tag { display: inline-block; background: rgba(96,165,250,.15); color: var(--blue); border: 1px dashed rgba(96,165,250,.4); font-size: 9.5px; font-weight: 700; letter-spacing: .8px; padding: 1px 6px; border-radius: 6px; vertical-align: middle; }
+
+/* filas atenuadas (falsas/descartadas/usuarios inactivos): auditoría visible pero discreta */
+.row-dim { opacity: .45; }
+.row-dim:hover { opacity: .8; }
+
+/* chip de usuario + rol en el header */
+.user-chip { display: inline-flex; align-items: center; gap: 10px; }
+.user-chip .user-name { font-size: 13px; color: var(--fg); display: inline-flex; align-items: center; gap: 6px; }
+.role-tag { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; padding: 2px 7px; border-radius: 6px; }
+.role-tag.admin    { background: rgba(45,212,191,.15); color: var(--accent); }
+.role-tag.operador { background: rgba(96,165,250,.15); color: var(--blue); }
+
+/* leyenda de riesgo del mapa (Leaflet control) */
+.map-legend { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 14px; font-size: 12px; color: var(--fg); box-shadow: var(--shadow); }
+.map-legend strong { display: block; margin-bottom: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.map-legend div { display: flex; align-items: center; gap: 7px; padding: 1.5px 0; }
+.dot-legend { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+
+/* historial de cambios de una alerta (modal de atención) */
+.history-list { list-style: none; padding: 0; margin: 0; max-height: 240px; overflow-y: auto; }
+.history-list li { padding: 9px 12px; border-left: 2px solid var(--line); margin-left: 4px; font-size: 13px; }
+.history-list li + li { margin-top: 4px; }
+.history-when { color: var(--muted); font-size: 11.5px; margin-right: 8px; }
+.history-user { color: var(--accent-2); font-size: 12px; margin-left: 8px; }
+.history-comment { color: var(--muted); margin-top: 4px; font-size: 12.5px; padding-left: 4px; }
+
+/* toast (aviso flotante no bloqueante) */
+#toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--surface-2); color: var(--fg); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 12px 20px; border-radius: var(--radius-sm); font-size: 13.5px; box-shadow: var(--shadow-lg); opacity: 0; pointer-events: none; transition: .25s ease; z-index: 2000; max-width: 90vw; }
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.error { border-left-color: var(--red); }
+
+/* pestaña Admin: grid de parámetros + alta de usuario */
+.param-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px 18px; margin-top: 10px; }
+.param-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.param-key { font-size: 12.5px; color: var(--fg); }
+.param-input { max-width: 110px; text-align: right; }
+.admin-new-user { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; align-items: center; }
+.admin-new-user .form-input { width: auto; flex: 1 1 150px; }
+.btn-sm.danger { color: var(--red); border-color: rgba(245,97,110,.35); }
+.btn-sm.danger:hover { background: rgba(245,97,110,.12); }
+.sensors-inline { font-size: 11.5px; color: var(--muted); }
+
+/* página de login */
+.login-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: radial-gradient(1200px 600px at 70% -10%, rgba(45,212,191,.07), transparent), var(--bg); }
+.login-card { width: min(400px, 92vw); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 36px 34px 26px; box-shadow: var(--shadow-lg); }
+.login-brand { text-align: center; margin-bottom: 22px; }
+.login-brand .logo.big { font-size: 44px; width: auto; height: auto; background: none; margin-bottom: 6px; }
+.login-brand h1 { font-size: 19px; margin: 4px 0 2px; }
+.login-btn { width: 100%; margin-top: 20px; padding: 12px; font-size: 15px; }
+.login-error { background: rgba(245,97,110,.12); border: 1px solid rgba(245,97,110,.35); color: var(--red); padding: 10px 12px; border-radius: 9px; font-size: 13px; margin-top: 14px; }
+.login-foot { text-align: center; margin-top: 18px; }
+
 /* ============================== Responsive ============================== */
 @media (max-width: 1200px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } .grid-2, .charts-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) {
@@ -323,4 +403,6 @@ th[data-sort]:hover { color: var(--fg); }
   .kpi-row { grid-template-columns: repeat(2, 1fr); }
   .top-right .clock { display: none; } .subtitle { display: none; }
   .node-detail-grid { grid-template-columns: 1fr; }
+  .param-grid { grid-template-columns: 1fr; }
+  .user-chip .user-name span { display: none; }
 }

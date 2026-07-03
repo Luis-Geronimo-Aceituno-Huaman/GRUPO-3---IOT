@@ -1,30 +1,42 @@
 /*
- * app.js — Punto de entrada. Inicializa todo y conecta los controles.
+ * app.js — Punto de entrada. Sesión + inicialización + KPIs.
  *
- * Orden de carga (ver index.html): data.js → charts.js → map.js → alerts.js → app.js
+ * Orden de carga (ver index.html): data.js → charts.js → map.js → alerts.js
+ *                                  → nodes.js → admin.js → app.js
+ *
+ * Flujo de arranque:
+ *   1. GET /api/auth/me → si 401, redirige a login.html (nada se pinta sin sesión).
+ *   2. loadNodes() + applyRealAlerts() → TODO desde la BD (cero datos demo).
+ *   3. Render de KPIs, tablas, mapa y gráficos.
  */
 
 function renderKpis() {
   const DAY = 24 * 60 * 60 * 1000;
-  const today = ALERTS.filter(a => Date.now() - a.ts < DAY).length;
+  const vis = visibleAlerts();
+  const today = vis.filter(a => Date.now() - a.ts < DAY).length;
   const counts = alertCountsByNode();
   const activeNodes = Object.values(counts).filter(c => c > 0).length;
 
-  // nodo más crítico = el de más alertas
-  let critId = null, critMax = -1;
-  for (const [id, c] of Object.entries(counts)) if (c > critMax) { critMax = c; critId = id; }
-  const critNode = NODE_BY_ID[critId];
+  // nodo más crítico = el de MAYOR RIESGO (motor risk.py); empata por alertas
+  const orden = { critico: 3, alto: 2, medio: 1, bajo: 0 };
+  const crit = [...NODES].sort((a, b) =>
+    (orden[b.riskLevel] || 0) - (orden[a.riskLevel] || 0) ||
+    (b.riskScore || 0) - (a.riskScore || 0) ||
+    (counts[b.id] || 0) - (counts[a.id] || 0))[0];
 
-  const avgConf = ALERTS.length
-    ? Math.round((ALERTS.reduce((s, a) => s + a.confidence, 0) / ALERTS.length) * 100)
+  const avgConf = vis.length
+    ? Math.round((vis.reduce((s, a) => s + (a.confidence || 0), 0) / vis.length) * 100)
     : 0;
-  const pending = ALERTS.filter(a => a.status === 'nueva').length;
+  const pending = ALERTS.filter(a => a.status === 'pendiente' || a.status === 'en-revision').length;
 
   document.getElementById('kpiTotal').textContent = ALERTS.length;
   document.getElementById('kpiToday').textContent = today;
   document.getElementById('kpiNodes').textContent = activeNodes + ' / ' + NODES.length;
-  document.getElementById('kpiCritical').textContent = critNode ? critNode.name : '—';
-  document.getElementById('kpiCriticalSub').textContent = critNode ? critMax + ' alertas · ' + critNode.district : '';
+  document.getElementById('kpiCritical').innerHTML = crit
+    ? crit.name + ' ' + (RISK_EMOJI[crit.riskLevel] || '') : '—';
+  document.getElementById('kpiCriticalSub').textContent = crit
+    ? `riesgo ${RISK_LABEL[crit.riskLevel] || '?'} (${Math.round(crit.riskScore || 0)}) · ${counts[crit.id] || 0} alertas`
+    : '';
   document.getElementById('kpiConf').textContent = avgConf + '%';
   document.getElementById('kpiPending').textContent = pending;
 }
@@ -41,23 +53,67 @@ function startClock() {
   setInterval(tick, 1000);
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-  // cargar distritos reales resueltos (paso 1) antes de pintar; si falla usa demo
-  await applyResolvedNodes();
+/* ---------------- sesión ---------------- */
+async function bootstrapSession() {
+  const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+  if (!res.ok) {
+    window.location.href = 'login.html';
+    throw new Error('sin sesión');
+  }
+  CURRENT_USER = await res.json();
 
-  // cargar alertas REALES confirmadas por el detector; si no hay API, queda vacío
-  const realCount = await applyRealAlerts();
+  // chip de usuario + logout en el header
+  const chip = document.getElementById('userChip');
+  if (chip) {
+    chip.innerHTML = `
+      <span class="user-name" title="${CURRENT_USER.full_name || ''}">
+        👤 ${CURRENT_USER.username}
+        <span class="role-tag ${CURRENT_USER.role}">${CURRENT_USER.role}</span>
+      </span>
+      <button class="btn-sm" id="logoutBtn" title="Cerrar sesión">Salir</button>`;
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      try { await fetchJSON('/api/auth/logout', { method: 'POST' }); } catch (e) { /* igual salimos */ }
+      window.location.href = 'login.html';
+    });
+  }
+
+  // controles solo-admin (pestaña Admin)
+  if (CURRENT_USER.role === 'admin') {
+    document.querySelectorAll('.admin-only').forEach(el => { el.hidden = false; });
+  }
+}
+
+/* refresco periódico suave: riesgo/estados cambian solos (job cada 5 min) */
+function startAutoRefresh(intervalMs = 60000) {
+  setInterval(async () => {
+    try {
+      await reloadData();
+      renderKpis();
+      renderMainAlerts();
+      renderAttentionQueue();
+      refreshMapLayers();
+      renderAllCharts();
+    } catch (e) { /* sin red: se reintenta al siguiente tick */ }
+  }, intervalMs);
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await bootstrapSession();          // redirige a login.html si no hay sesión
+
+  // TODO viene de la BD: nodos (con riesgo/sensores) + alertas confirmadas
+  const [nodeCount, realCount] = await Promise.all([loadNodes(), applyRealAlerts()]);
   const badge = document.querySelector('.badge-live');
   if (badge) {
     badge.textContent = realCount !== false
-      ? `EN VIVO · ${realCount} alertas confirmadas`
+      ? `EN VIVO · ${realCount} alertas · ${nodeCount || 0} nodos`
       : 'SIN CONEXIÓN · /api/alerts';
     badge.classList.toggle('off', realCount === false);
   }
 
-  // KPIs + tabla principal
+  // KPIs + tabla principal + cola de atención
   renderKpis();
   renderMainAlerts();
+  renderAttentionQueue();
 
   // mapa + gráficos
   initMap();
@@ -80,4 +136,5 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   startClock();
+  startAutoRefresh();
 });

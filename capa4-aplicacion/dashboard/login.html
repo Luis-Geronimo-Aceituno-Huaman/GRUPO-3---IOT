@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ingreso — Panel IoT Vigilancia de Dengue</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="login-page">
+
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="logo big">🦟</div>
+      <h1>Panel IoT — Vigilancia de Dengue</h1>
+      <p class="subtitle">Red de nodos ESP32 · Lima</p>
+    </div>
+
+    <form id="loginForm" autocomplete="on">
+      <label class="form-label" for="username">Usuario</label>
+      <input id="username" class="form-input" type="text" autocomplete="username"
+             placeholder="usuario" required autofocus />
+
+      <label class="form-label" for="password">Contraseña</label>
+      <input id="password" class="form-input" type="password" autocomplete="current-password"
+             placeholder="••••••••" required />
+
+      <div id="loginError" class="login-error" hidden></div>
+
+      <button type="submit" class="btn accent login-btn" id="loginBtn">Ingresar</button>
+    </form>
+
+    <p class="muted small login-foot">
+      El acceso queda registrado en la auditoría del sistema.
+    </p>
+  </div>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const errBox = document.getElementById('loginError');
+    const btn = document.getElementById('loginBtn');
+
+    // Si ya hay sesión válida, directo al dashboard.
+    fetch('/api/auth/me', { credentials: 'same-origin' })
+      .then(r => { if (r.ok) window.location.href = 'index.html'; })
+      .catch(() => {});
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      btn.disabled = true; btn.textContent = 'Verificando…';
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('username').value.trim(),
+            password: document.getElementById('password').value,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'error ' + res.status);
+        window.location.href = 'index.html';
+      } catch (err) {
+        errBox.textContent = '⛔ ' + err.message;
+        errBox.hidden = false;
+        btn.disabled = false; btn.textContent = 'Ingresar';
+      }
+    });
+  </script>
+</body>
+</html>

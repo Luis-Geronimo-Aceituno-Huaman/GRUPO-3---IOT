@@ -1,32 +1,34 @@
 """
-db.py — Capa de persistencia del servidor de monitoreo (SQLite).
+db.py — Capa de persistencia del monitoreo de nodos, ahora sobre PostgreSQL.
 
-Implementa el esquema del spec ("DATABASE SCHEMA") + una tabla extra
-status_history para cumplir "Store status history so you can see when a node went
-offline and came back".
+Conserva EXACTAMENTE la interfaz pública de la versión SQLite (MonitorDB con los
+mismos métodos y los mismos nombres de clave en los dicts que devuelve), para que
+mqtt_ingest.py, heartbeat_monitor.py, video_indexer.py y serve.py no cambien:
 
-Tablas:
-  nodes        node_name PK, first_seen, last_seen, last_heartbeat, status,
-               battery_pct, chip_temp_c, threshold, uptime_s
-  detections   id, node_name, timestamp, score, threshold_used, seq
-  heartbeats   id, node_name, timestamp, battery_pct, chip_temp_c, uptime_s,
-               threshold, status
-  videos       id, node_name, received_at, file_path, file_size_kb
-  anomalies    id, node_name, timestamp, type, detail
-  status_history id, node_name, timestamp, old_status, new_status
+  - las filas siguen saliendo con 'node_name' / 'timestamp' / 'received_at'
+    (en la BD las columnas son node_id / ts, se renombran con alias al leer);
+  - los timestamps siguen siendo strings ISO 8601 con zona horaria (los
+    TIMESTAMPTZ de PG se convierten con .isoformat() al leer, y al escribir
+    PG castea el string ISO que le pasamos).
 
-Todos los timestamps se guardan como TEXTO ISO 8601 CON zona horaria (spec:
-"All timestamps stored and displayed in ISO 8601 format with timezone").
-La BD es de uso concurrente (MQTT, job de heartbeat, HTTP), asi que toda
-escritura/lectura pasa por un unico Lock y connect(check_same_thread=False).
+El esquema vive en ../database/schema.sql (tablas nodes, detections, heartbeats,
+videos, anomalies, node_status_history — con FKs e índices de verdad).
+El pool de conexiones es el global de ../database.py (thread-safe).
 """
 
 from __future__ import annotations
 
-import sqlite3
-import threading
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# database.py vive en capa3/ (el padre). El monitor se importa con capa3/monitor/
+# en sys.path (así lo hace serve.py), de modo que 'import database' no resolvería.
+_CAPA3 = str(Path(__file__).resolve().parents[1])
+if _CAPA3 not in sys.path:
+    sys.path.insert(0, _CAPA3)
+
+from database import get_pool     # noqa: E402
 
 
 def now_iso() -> str:
@@ -46,300 +48,317 @@ def unix_to_iso(unix_s) -> str | None:
     return datetime.fromtimestamp(u, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def _iso(v) -> str | None:
+    """datetime de PG -> string ISO (contrato viejo de esta capa)."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.astimezone().isoformat(timespec="seconds")
+    return str(v)
+
+
 STATUS_ONLINE = "ONLINE"
 STATUS_OFFLINE = "OFFLINE"
 STATUS_COMPROMISED = "COMPROMISED"
 STATUS_UNKNOWN = "UNKNOWN"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS nodes (
-    node_name      TEXT PRIMARY KEY,
-    first_seen     TEXT NOT NULL,
-    last_seen      TEXT NOT NULL,
-    last_heartbeat TEXT,
-    status         TEXT NOT NULL DEFAULT 'UNKNOWN',
-    battery_pct    INTEGER,
-    chip_temp_c    REAL,
-    threshold      REAL,
-    uptime_s       INTEGER
-);
+# Columnas de nodes que update_node_fields puede tocar (whitelist: los kwargs
+# vienen del código propio, pero nunca interpolamos nombres sin validar).
+_NODE_COLS = {
+    "node_name", "district", "lat", "lon", "alt", "status", "battery_pct",
+    "chip_temp_c", "threshold", "uptime_s", "last_heartbeat", "last_seen",
+    "last_reading", "is_simulated", "risk_level", "risk_score",
+}
 
-CREATE TABLE IF NOT EXISTS detections (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_name      TEXT NOT NULL REFERENCES nodes(node_name),
-    timestamp      TEXT NOT NULL,
-    score          REAL,
-    threshold_used REAL,
-    seq            INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_det_node_ts ON detections(node_name, timestamp DESC);
-
-CREATE TABLE IF NOT EXISTS heartbeats (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_name   TEXT NOT NULL REFERENCES nodes(node_name),
-    timestamp   TEXT NOT NULL,
-    battery_pct INTEGER,
-    chip_temp_c REAL,
-    uptime_s    INTEGER,
-    threshold   REAL,
-    status      TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_hb_node_ts ON heartbeats(node_name, timestamp DESC);
-
-CREATE TABLE IF NOT EXISTS videos (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_name    TEXT NOT NULL REFERENCES nodes(node_name),
-    received_at  TEXT NOT NULL,
-    file_path    TEXT NOT NULL UNIQUE,
-    file_size_kb INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_vid_node ON videos(node_name, received_at DESC);
-
-CREATE TABLE IF NOT EXISTS anomalies (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_name TEXT NOT NULL REFERENCES nodes(node_name),
-    timestamp TEXT NOT NULL,
-    type      TEXT,
-    detail    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_anom_node_ts ON anomalies(node_name, timestamp DESC);
-
-CREATE TABLE IF NOT EXISTS status_history (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_name  TEXT NOT NULL REFERENCES nodes(node_name),
-    timestamp  TEXT NOT NULL,
-    old_status TEXT,
-    new_status TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sh_node_ts ON status_history(node_name, timestamp DESC);
+# Alias de lectura: la BD dice node_id/ts, el resto del código espera
+# node_name/timestamp (contrato de la versión SQLite).
+_NODE_SELECT = """
+    SELECT node_id AS node_name, node_name AS display_name, district, lat, lon, alt,
+           status, battery_pct, chip_temp_c, threshold, uptime_s,
+           first_seen, last_seen, last_heartbeat, last_reading,
+           is_simulated, risk_level, risk_score
+    FROM nodes
 """
+
+_NODE_TS_KEYS = ("first_seen", "last_seen", "last_heartbeat", "last_reading")
 
 
 class MonitorDB:
-    def __init__(self, db_path):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL;")   # mejor concurrencia lectura/escritura
-        self.conn.executescript(SCHEMA)
-        self.conn.commit()
+    """Misma interfaz que la versión SQLite. `db_path` se ignora (compat)."""
+
+    def __init__(self, db_path=None):
+        self.pool = get_pool()
 
     # ---------------------------------------------------------------- nodes
     def register_node(self, node_name: str) -> bool:
         """Auto-registro: crea el nodo la PRIMERA vez que se le ve y actualiza
         last_seen siempre. Devuelve True si era un nodo nuevo (recien registrado)."""
-        ts = now_iso()
-        with self._lock:
-            exists = self.conn.execute(
-                "SELECT 1 FROM nodes WHERE node_name=?", (node_name,)
-            ).fetchone() is not None
-            if exists:
-                self.conn.execute(
-                    "UPDATE nodes SET last_seen=? WHERE node_name=?", (ts, node_name)
-                )
-            else:
-                self.conn.execute(
-                    """INSERT INTO nodes (node_name, first_seen, last_seen, status)
-                       VALUES (?,?,?, 'UNKNOWN')""",
-                    (node_name, ts, ts),
-                )
-            self.conn.commit()
-        return not exists
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                """INSERT INTO nodes (node_id, status) VALUES (%s, 'UNKNOWN')
+                   ON CONFLICT (node_id) DO UPDATE SET last_seen = now()
+                   RETURNING (xmax = 0) AS inserted""",
+                (node_name,),
+            ).fetchone()
+        return bool(row["inserted"])
 
     def update_node_fields(self, node_name: str, **fields):
         """Actualiza columnas sueltas de un nodo (battery_pct, chip_temp_c, ...)."""
+        fields = {k: v for k, v in fields.items() if k in _NODE_COLS}
         if not fields:
             return
-        cols = ", ".join(f"{k}=?" for k in fields)
+        cols = ", ".join(f"{k}=%s" for k in fields)
         vals = list(fields.values()) + [node_name]
-        with self._lock:
-            self.conn.execute(f"UPDATE nodes SET {cols} WHERE node_name=?", vals)
-            self.conn.commit()
+        with self.pool.connection() as conn:
+            conn.execute(f"UPDATE nodes SET {cols} WHERE node_id=%s", vals)
 
     def set_status(self, node_name: str, new_status: str):
-        """Cambia el status del nodo y registra la transicion en status_history si
-        de verdad cambio. Asi queda el rastro de cuando cayo y cuando volvio."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT status FROM nodes WHERE node_name=?", (node_name,)
+        """Cambia el status del nodo y registra la transicion en
+        node_status_history si de verdad cambio (rastro de caidas/regresos)."""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM nodes WHERE node_id=%s FOR UPDATE", (node_name,)
             ).fetchone()
             old = row["status"] if row else None
             if old == new_status:
                 return
-            self.conn.execute(
-                "UPDATE nodes SET status=? WHERE node_name=?", (new_status, node_name)
+            conn.execute(
+                "UPDATE nodes SET status=%s WHERE node_id=%s", (new_status, node_name)
             )
-            self.conn.execute(
-                """INSERT INTO status_history (node_name, timestamp, old_status, new_status)
-                   VALUES (?,?,?,?)""",
-                (node_name, now_iso(), old, new_status),
+            conn.execute(
+                """INSERT INTO node_status_history (node_id, ts, old_status, new_status)
+                   VALUES (%s, now(), %s, %s)""",
+                (node_name, old, new_status),
             )
-            self.conn.commit()
+
+    def _node_row(self, r: dict) -> dict:
+        for k in _NODE_TS_KEYS:
+            r[k] = _iso(r.get(k))
+        return r
 
     def all_nodes(self) -> list[dict]:
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT * FROM nodes ORDER BY node_name"
-            ).fetchall()
-        return [dict(r) for r in rows]
+        with self.pool.connection() as conn:
+            rows = conn.execute(_NODE_SELECT + " ORDER BY node_id").fetchall()
+        return [self._node_row(r) for r in rows]
 
     def get_node(self, node_name: str) -> dict | None:
-        with self._lock:
-            r = self.conn.execute(
-                "SELECT * FROM nodes WHERE node_name=?", (node_name,)
+        with self.pool.connection() as conn:
+            r = conn.execute(
+                _NODE_SELECT + " WHERE node_id=%s", (node_name,)
             ).fetchone()
-        return dict(r) if r else None
+        return self._node_row(r) if r else None
 
     def node_threshold(self, node_name: str):
-        n = self.get_node(node_name)
-        return n["threshold"] if n else None
+        with self.pool.connection() as conn:
+            r = conn.execute(
+                "SELECT threshold FROM nodes WHERE node_id=%s", (node_name,)
+            ).fetchone()
+        return r["threshold"] if r else None
 
     # ------------------------------------------------------------ detections
     def insert_detection(self, node_name, timestamp, score, threshold_used, seq) -> int:
-        with self._lock:
-            cur = self.conn.execute(
-                """INSERT INTO detections (node_name, timestamp, score, threshold_used, seq)
-                   VALUES (?,?,?,?,?)""",
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                """INSERT INTO detections (node_id, ts, score, threshold_used, seq)
+                   VALUES (%s,%s,%s,%s,%s) RETURNING id""",
                 (node_name, timestamp, score, threshold_used, seq),
-            )
-            self.conn.commit()
-            return cur.lastrowid
+            ).fetchone()
+        return row["id"]
 
     def detections(self, node_name, page=1, size=50) -> tuple[list[dict], int]:
         """Historial paginado de detecciones de un nodo. Devuelve (filas, total)."""
         off = max(0, (page - 1) * size)
-        with self._lock:
-            total = self.conn.execute(
-                "SELECT COUNT(*) c FROM detections WHERE node_name=?", (node_name,)
+        with self.pool.connection() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) c FROM detections WHERE node_id=%s", (node_name,)
             ).fetchone()["c"]
-            rows = self.conn.execute(
-                """SELECT * FROM detections WHERE node_name=?
-                   ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?""",
+            rows = conn.execute(
+                """SELECT id, node_id AS node_name, ts AS timestamp,
+                          score, threshold_used, seq
+                   FROM detections WHERE node_id=%s
+                   ORDER BY ts DESC, id DESC LIMIT %s OFFSET %s""",
                 (node_name, size, off),
             ).fetchall()
-        return [dict(r) for r in rows], total
+        for r in rows:
+            r["timestamp"] = _iso(r["timestamp"])
+        return rows, total
 
     def last_detection(self, node_name) -> dict | None:
-        with self._lock:
-            r = self.conn.execute(
-                """SELECT * FROM detections WHERE node_name=?
-                   ORDER BY timestamp DESC, id DESC LIMIT 1""",
+        with self.pool.connection() as conn:
+            r = conn.execute(
+                """SELECT id, node_id AS node_name, ts AS timestamp,
+                          score, threshold_used, seq
+                   FROM detections WHERE node_id=%s
+                   ORDER BY ts DESC, id DESC LIMIT 1""",
                 (node_name,),
             ).fetchone()
-        return dict(r) if r else None
+        if r:
+            r["timestamp"] = _iso(r["timestamp"])
+        return r
 
     # ------------------------------------------------------------ heartbeats
     def insert_heartbeat(self, node_name, timestamp, battery_pct, chip_temp_c,
                          uptime_s, threshold, status) -> int:
-        with self._lock:
-            cur = self.conn.execute(
+        with self.pool.connection() as conn:
+            row = conn.execute(
                 """INSERT INTO heartbeats
-                   (node_name, timestamp, battery_pct, chip_temp_c, uptime_s, threshold, status)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (node_name, timestamp, battery_pct, chip_temp_c, uptime_s, threshold, status),
-            )
-            self.conn.commit()
-            return cur.lastrowid
+                   (node_id, ts, battery_pct, chip_temp_c, uptime_s, threshold, status)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (node_name, timestamp, battery_pct, chip_temp_c,
+                 uptime_s, threshold, status),
+            ).fetchone()
+        return row["id"]
 
     def heartbeats(self, node_name, limit=200) -> list[dict]:
         """Ultimos N heartbeats en orden CRONOLOGICO (para graficar tendencias)."""
-        with self._lock:
-            rows = self.conn.execute(
-                """SELECT * FROM heartbeats WHERE node_name=?
-                   ORDER BY timestamp DESC, id DESC LIMIT ?""",
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, node_id AS node_name, ts AS timestamp,
+                          battery_pct, chip_temp_c, uptime_s, threshold, status
+                   FROM heartbeats WHERE node_id=%s
+                   ORDER BY ts DESC, id DESC LIMIT %s""",
                 (node_name, limit),
             ).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        for r in rows:
+            r["timestamp"] = _iso(r["timestamp"])
+        return list(reversed(rows))
 
     # ------------------------------------------------------------ videos
     def insert_video(self, node_name, received_at, file_path, file_size_kb) -> int | None:
         """Inserta un video; ignora si ya existe (file_path es UNIQUE)."""
-        with self._lock:
-            cur = self.conn.execute(
-                """INSERT OR IGNORE INTO videos (node_name, received_at, file_path, file_size_kb)
-                   VALUES (?,?,?,?)""",
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                """INSERT INTO videos (node_id, received_at, file_path, file_size_kb)
+                   VALUES (%s,%s,%s,%s)
+                   ON CONFLICT (file_path) DO NOTHING RETURNING id""",
                 (node_name, received_at, file_path, file_size_kb),
-            )
-            self.conn.commit()
-            return cur.lastrowid if cur.rowcount else None
+            ).fetchone()
+        return row["id"] if row else None
 
     def video_exists(self, file_path) -> bool:
-        with self._lock:
-            r = self.conn.execute(
-                "SELECT 1 FROM videos WHERE file_path=?", (file_path,)
+        with self.pool.connection() as conn:
+            r = conn.execute(
+                "SELECT 1 FROM videos WHERE file_path=%s", (file_path,)
             ).fetchone()
         return r is not None
 
     def delete_video(self, video_id) -> str | None:
         """Borra un video por id. Devuelve su file_path (para borrar el archivo
         del disco) o None si no existia."""
-        with self._lock:
-            r = self.conn.execute(
-                "SELECT file_path FROM videos WHERE id=?", (video_id,)
+        with self.pool.connection() as conn:
+            r = conn.execute(
+                "DELETE FROM videos WHERE id=%s RETURNING file_path", (video_id,)
             ).fetchone()
-            if r is None:
-                return None
-            self.conn.execute("DELETE FROM videos WHERE id=?", (video_id,))
-            self.conn.commit()
-            return r["file_path"]
+        return r["file_path"] if r else None
 
     def videos(self, node_name=None, order="received_at", desc=True) -> list[dict]:
         order = order if order in ("received_at", "node_name", "file_size_kb") else "received_at"
+        col = {"received_at": "received_at", "node_name": "node_id",
+               "file_size_kb": "file_size_kb"}[order]
         direction = "DESC" if desc else "ASC"
-        q = f"SELECT * FROM videos"
+        q = """SELECT id, node_id AS node_name, received_at, file_path, file_size_kb
+               FROM videos"""
         args = []
         if node_name:
-            q += " WHERE node_name=?"
+            q += " WHERE node_id=%s"
             args.append(node_name)
-        q += f" ORDER BY {order} {direction}"
-        with self._lock:
-            rows = self.conn.execute(q, args).fetchall()
-        return [dict(r) for r in rows]
+        q += f" ORDER BY {col} {direction}"
+        with self.pool.connection() as conn:
+            rows = conn.execute(q, args).fetchall()
+        for r in rows:
+            r["received_at"] = _iso(r["received_at"])
+        return rows
 
     # ------------------------------------------------------------ anomalies
     def insert_anomaly(self, node_name, timestamp, type_, detail) -> int:
-        with self._lock:
-            cur = self.conn.execute(
-                """INSERT INTO anomalies (node_name, timestamp, type, detail)
-                   VALUES (?,?,?,?)""",
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                """INSERT INTO anomalies (node_id, ts, type, detail)
+                   VALUES (%s,%s,%s,%s) RETURNING id""",
                 (node_name, timestamp, type_, detail),
-            )
-            self.conn.commit()
-            return cur.lastrowid
+            ).fetchone()
+        return row["id"]
 
     def anomalies(self, node_name, limit=100) -> list[dict]:
-        with self._lock:
-            rows = self.conn.execute(
-                """SELECT * FROM anomalies WHERE node_name=?
-                   ORDER BY timestamp DESC, id DESC LIMIT ?""",
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, node_id AS node_name, ts AS timestamp, type, detail
+                   FROM anomalies WHERE node_id=%s
+                   ORDER BY ts DESC, id DESC LIMIT %s""",
                 (node_name, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        for r in rows:
+            r["timestamp"] = _iso(r["timestamp"])
+        return rows
 
-    # ------------------------------------------------------------ status_history
+    # ------------------------------------------------------ status_history
     def status_history(self, node_name, limit=50) -> list[dict]:
-        with self._lock:
-            rows = self.conn.execute(
-                """SELECT * FROM status_history WHERE node_name=?
-                   ORDER BY timestamp DESC, id DESC LIMIT ?""",
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, node_id AS node_name, ts AS timestamp,
+                          old_status, new_status
+                   FROM node_status_history WHERE node_id=%s
+                   ORDER BY ts DESC, id DESC LIMIT %s""",
                 (node_name, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        for r in rows:
+            r["timestamp"] = _iso(r["timestamp"])
+        return rows
+
+    # ------------------------------------------------------ lecturas de sensores
+    def insert_reading(self, node_name, reading: dict):
+        """Guarda una lectura del topic devices/+/sensors (histórico para el motor
+        de riesgo). Los campos conocidos van a columnas; el resto a extra JSONB.
+        Aditivo: el ESP32 real solo manda turb_raw/turb_v/temp_c."""
+        import json as _json
+        known = {k: reading.get(k) for k in
+                 ("temp_c", "turb_raw", "turb_v", "humedad", "ph",
+                  "nivel_agua", "audio_conf")}
+        extra = {k: v for k, v in reading.items()
+                 if k not in known and not k.startswith("_")}
+        with self.pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO sensor_readings
+                   (node_id, temp_c, turb_raw, turb_v, humedad, ph, nivel_agua,
+                    audio_conf, extra)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (node_name, known["temp_c"], known["turb_raw"], known["turb_v"],
+                 known["humedad"], known["ph"], known["nivel_agua"],
+                 known["audio_conf"], _json.dumps(extra) if extra else None),
+            )
+            conn.execute(
+                "UPDATE nodes SET last_reading = now() WHERE node_id=%s",
+                (node_name,),
+            )
+
+    def last_reading(self, node_name) -> dict | None:
+        """Última lectura de sensores del nodo (para el motor de riesgo)."""
+        with self.pool.connection() as conn:
+            r = conn.execute(
+                """SELECT node_id AS node_name, ts, temp_c, turb_raw, turb_v,
+                          humedad, ph, nivel_agua, audio_conf, extra
+                   FROM sensor_readings WHERE node_id=%s
+                   ORDER BY ts DESC, id DESC LIMIT 1""",
+                (node_name,),
+            ).fetchone()
+        if r:
+            r["ts"] = _iso(r["ts"])
+        return r
 
     def close(self):
-        with self._lock:
-            self.conn.close()
+        pass    # el pool es global y compartido; lo cierra database.close_pool()
 
 
 if __name__ == "__main__":
-    # Smoke test minimo del esquema.
+    # Smoke test minimo contra el PG real.
     import json
-    db = MonitorDB(":memory:")
-    print("nuevo:", db.register_node("esp32-01"))
-    print("repetido:", db.register_node("esp32-01"))
-    db.insert_heartbeat("esp32-01", now_iso(), -1, 41.5, 123, 0.62, "alive")
-    db.set_status("esp32-01", STATUS_ONLINE)
-    db.insert_detection("esp32-01", now_iso(), 0.88, 0.62, 7)
-    print(json.dumps(db.all_nodes(), indent=2, ensure_ascii=False))
+    db = MonitorDB()
+    print("nuevo:", db.register_node("esp32-smoke"))
+    print("repetido:", db.register_node("esp32-smoke"))
+    db.insert_heartbeat("esp32-smoke", now_iso(), -1, 41.5, 123, 0.62, "alive")
+    db.set_status("esp32-smoke", STATUS_ONLINE)
+    db.insert_detection("esp32-smoke", now_iso(), 0.88, 0.62, 7)
+    db.insert_reading("esp32-smoke", {"temp_c": 26.5, "turb_v": 1.1,
+                                      "humedad": 70, "custom": 42})
+    print(json.dumps(db.get_node("esp32-smoke"), indent=2, ensure_ascii=False))
+    print(json.dumps(db.last_reading("esp32-smoke"), indent=2, ensure_ascii=False))

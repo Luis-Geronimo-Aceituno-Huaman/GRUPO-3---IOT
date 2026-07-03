@@ -67,7 +67,7 @@ real de tu VM antes de reflashear.
 
 ```bash
 pip install -r requirements-laptop.txt   # solo OpenCV
-bash run_laptop.sh                        # expone la webcam en :8091
+./iniciar.sh laptop                       # expone la webcam en :8091
 ```
 
 - Necesita **Avahi** para anunciarse por mDNS: `sudo apt install avahi-daemon`.
@@ -87,16 +87,20 @@ chmod 400 ~/Descargas/tu-clave.key
 ssh -i ~/Descargas/tu-clave.key ubuntu@140.x.x.x
 ```
 
-### Parte B · Broker MQTT en Docker, con clave (Capa 2)
-El broker ya está dockerizado y reproducible (`capa2-red/docker-compose.yml` +
-`mosquitto.conf` + `passwd`). En la VM solo instalás Docker y lo levantás igual que
-en tu laptop — **el mismo comando**:
+### Parte B · Broker MQTT + PostgreSQL en Docker (Capa 2 + datos)
+La infraestructura está dockerizada en el **compose de la raíz** (`docker-compose.yml`):
+mosquitto con clave + **PostgreSQL 16** (única BD del sistema: alertas, nodos,
+usuarios, auditoría). En la VM solo instalás Docker y lo levantás igual que en tu
+laptop — **el mismo comando**:
 ```bash
 sudo apt update && sudo apt install -y docker.io docker-compose-v2 python3-pip python3-opencv ffmpeg
 sudo usermod -aG docker $USER && newgrp docker          # usar docker sin sudo
-cd ~/iot/capa2-red && docker compose up -d              # levanta mosquitto-iot con clave
-docker compose logs --tail 10                           # verificar arranque
+cd ~/iot && docker compose up -d                        # mosquitto-iot + pg-iot
+docker compose ps                                       # esperar pg-iot "healthy"
 ```
+> En una VM limpia podés usar `PG_PORT=5432` en el `.env` (en la laptop de
+> desarrollo es 5433 porque el 5432 lo ocupa otro proyecto). El puerto de
+> PostgreSQL **solo escucha en localhost**: nunca se abre a internet.
 El `passwd` (usuario `esp32`) viaja con el `rsync` de la Parte C. Para cambiar la
 clave: `docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/work eclipse-mosquitto:2 mosquitto_passwd -b /work/passwd esp32 <NUEVA_CLAVE>` y `docker compose restart`.
 
@@ -123,19 +127,35 @@ MQTT_USER=esp32
 MQTT_PASS=iotmosquito2026
 GATEWAY_HTTP_HOST=0.0.0.0
 GATEWAY_HTTP_PORT=8090
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=iot
+PG_PASS=iotmosquito2026
+PG_DB=iot_mosquito
+SESSION_SECRET=cambia-por-un-secreto-largo-y-aleatorio
+ADMIN_INIT_PASS=cambia-la-clave-del-admin
 EOF
+
+# Crear el esquema + usuario admin + parámetros del detector (idempotente).
+# Si venís del PoC con SQLite, esto MIGRA datos/alerts.db y datos/monitor.db:
+python3 capa3-procesamiento-servidor/database/migrate_sqlite_to_pg.py
 ```
 > El `MQTT_USER`/`MQTT_PASS` debe coincidir con `capa2-red/passwd` (usuario `esp32`)
-> y con el `config.h` del ESP32. Si cambiaste la clave del broker, cambiala también aquí.
+> y con el `config.h` del ESP32. `PG_PASS` debe coincidir con el compose (variable
+> `PG_PASS` del mismo `.env` — el compose la lee). El dashboard exige login: entrá
+> como `admin` con la clave de `ADMIN_INIT_PASS` y creá los operadores desde la
+> pestaña Admin.
 
 ### Parte D · Dejarlo corriendo 24/7 (systemd)
 ```bash
-# Gateway (capa 3)
+# Gateway (capa 3) — espera a que PostgreSQL esté sano antes de arrancar
 sudo tee /etc/systemd/system/iot-gateway.service >/dev/null <<EOF
 [Unit]
-After=mosquitto.service
+After=docker.service
+Requires=docker.service
 [Service]
 WorkingDirectory=/home/ubuntu/iot/capa3-procesamiento-servidor
+ExecStartPre=/bin/sh -c 'until docker exec pg-iot pg_isready -q; do sleep 2; done'
 ExecStart=/usr/bin/python3 gateway.py
 Restart=always
 User=ubuntu
@@ -143,10 +163,14 @@ User=ubuntu
 WantedBy=multi-user.target
 EOF
 
-# Dashboard (capa 4)
+# Dashboard (capa 4) — mismo pre-chequeo de la BD
 sudo tee /etc/systemd/system/iot-dash.service >/dev/null <<EOF
+[Unit]
+After=docker.service
+Requires=docker.service
 [Service]
 WorkingDirectory=/home/ubuntu/iot/capa4-aplicacion
+ExecStartPre=/bin/sh -c 'until docker exec pg-iot pg_isready -q; do sleep 2; done'
 ExecStart=/usr/bin/python3 serve.py 8000
 Restart=always
 User=ubuntu
@@ -157,7 +181,8 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now iot-gateway iot-dash
 ```
-> Para probar a mano en una terminal (sin systemd): `bash run_nube.sh`.
+> Para probar a mano en una terminal (sin systemd): `./iniciar.sh nube`
+> (levanta también la infra Docker y aplica las semillas si la BD está vacía).
 
 ### Parte E · Abrir los puertos (LOS DOS lados — footgun de Oracle)
 1. **Security List** (web de Oracle): *Networking → VCN → Subnet → Security List → Add Ingress Rules*. Origen `0.0.0.0/0`, TCP, puertos **1883**, **8090**, **8000**.

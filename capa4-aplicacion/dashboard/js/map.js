@@ -1,17 +1,18 @@
 /*
- * map.js — Mapa de Lima con Leaflet.
+ * map.js — Mapa de Lima con Leaflet. SOLO nodos reales de la BD.
  *
  * Dos capas que se alternan:
- *   - "marcadores": un pin por nodo, con popup (nombre, distrito, # alertas, GPS/sats).
- *   - "calor":      heatmap de densidad de alertas → mapa de riesgo de dengue por zona.
- *
- * El GPS de cada nodo (lat/lon de la sentencia GGA) es lo que posiciona todo.
+ *   - "marcadores": un pin por nodo REGISTRADO con posición conocida; el color
+ *     es su NIVEL DE RIESGO (motor risk.py): 🟢 bajo · 🟡 medio · 🟠 alto · 🔴 crítico.
+ *   - "calor": heatmap de densidad de alertas VISIBLES (las falsas/descartadas
+ *     desaparecen del mapa automáticamente, pero siguen en BD para auditoría).
  */
 
 let _map = null;
 let _markersLayer = null;
 let _heatLayer = null;
 let _mapMode = 'marcadores';
+let _legend = null;
 
 function initMap() {
   _map = L.map('map', { zoomControl: true, attributionControl: false })
@@ -23,39 +24,69 @@ function initMap() {
     subdomains: 'abcd',
   }).addTo(_map);
 
+  _legend = _buildLegend();
+  _legend.addTo(_map);
+
+  refreshMapLayers();
+  setMapMode('marcadores');
+
+  // si solo hay un nodo con posición, centrar ahí
+  const located = NODES.filter(n => n.lat != null && n.lon != null);
+  if (located.length === 1) _map.setView([located[0].lat, located[0].lon], 13);
+  else if (located.length > 1) {
+    _map.fitBounds(located.map(n => [n.lat, n.lon]), { padding: [40, 40], maxZoom: 13 });
+  }
+}
+
+/** Reconstruye ambas capas con los datos actuales (se llama tras responder
+ * una alerta o al refrescar datos: el mapa SIEMPRE refleja la BD). */
+function refreshMapLayers() {
+  if (!_map) return;
+  const active = _mapMode;
   buildMarkersLayer();
   buildHeatLayer();
-  setMapMode('marcadores');
+  setMapMode(active);
+}
+
+function _sensorIcons(sensors) {
+  const icons = {
+    temp_ds18b20: '🌡️', turbidez: '💧', gps: '🛰️', audio: '🎤',
+    humedad: '💦', ph: '⚗️', nivel_agua: '🌊',
+  };
+  return (sensors || []).map(s => `<span title="${s}">${icons[s] || '🔧'}</span>`).join(' ');
 }
 
 function buildMarkersLayer() {
-  if (_markersLayer) _map.removeLayer(_markersLayer);
+  if (_markersLayer && _map.hasLayer(_markersLayer)) _map.removeLayer(_markersLayer);
   _markersLayer = L.layerGroup();
 
-  const counts = alertCountsByNode();
-  const maxCount = Math.max(1, ...Object.values(counts));
-
   for (const node of NODES) {
-    const c = counts[node.id] || 0;
+    if (node.lat == null || node.lon == null) continue;   // sin posición conocida
+
+    const color = RISK_COLOR[node.riskLevel] || RISK_COLOR.bajo;
+    const score = node.riskScore || 0;
+    const radius = 10 + (score / 100) * 14;               // más riesgo = pin más grande
     const last = alertsForNode(node.id)[0];
-    // tamaño/color del pin según cantidad de alertas (más alertas = más crítico)
-    const ratio = c / maxCount;
-    const radius = 8 + ratio * 16;
-    const color = ratio > 0.66 ? '#ff4d4f' : ratio > 0.33 ? '#faad14' : '#52c41a';
 
     const marker = L.circleMarker([node.lat, node.lon], {
-      radius, color, weight: 2, fillColor: color, fillOpacity: 0.35,
+      radius, color, weight: 2, fillColor: color, fillOpacity: 0.4,
     });
 
+    // Req.7: TODOS los datos del popup salen de la BD (nada fijo en el código).
     marker.bindPopup(
       '<div class="map-popup">' +
-        '<strong>' + node.name + '</strong><br>' +
+        '<strong>' + node.name + '</strong>' +
+        (node.isSimulated ? ' <span class="sim-tag">SIM</span>' : '') + '<br>' +
         '<span class="muted">' + node.district + '</span><br>' +
-        '<b>' + c + '</b> alertas registradas<br>' +
-        (last
-          ? 'Última: ' + timeAgo(last.ts) + '<br>GPS sats: ' + last.sensors.sats
-          : 'Sin alertas') +
-        '<br><a href="#" onclick="renderNodeDetail(\'' + node.id + '\');return false;">Ver historial →</a>' +
+        riskBadge(node.riskLevel, node.riskScore) + '<br>' +
+        'Estado: <b>' + (node.status || '?') + '</b><br>' +
+        '<b>' + (node.alertVisible ?? 0) + '</b> alertas activas' +
+        ((node.alertCount ?? 0) > (node.alertVisible ?? 0)
+          ? ' <span class="muted small">(' + node.alertCount + ' total con descartadas)</span>' : '') + '<br>' +
+        'Sensores: ' + (_sensorIcons(node.sensors) || '<span class="muted">?</span>') + '<br>' +
+        (node.lastReading ? 'Última lectura: ' + timeAgo(Date.parse(node.lastReading)) + '<br>' : '') +
+        (last ? 'Última alerta: ' + timeAgo(last.ts) + '<br>' : 'Sin alertas<br>') +
+        '<a href="#" onclick="renderNodeDetail(\'' + node.id + '\');return false;">Ver historial →</a>' +
       '</div>'
     );
     marker.on('click', () => marker.openPopup());
@@ -64,9 +95,12 @@ function buildMarkersLayer() {
 }
 
 function buildHeatLayer() {
-  if (_heatLayer) _map.removeLayer(_heatLayer);
-  // un punto de calor por alerta, ponderado por la confianza de detección
-  const points = ALERTS.map(a => [a.lat, a.lon, a.confidence]);
+  if (_heatLayer && _map.hasLayer(_heatLayer)) _map.removeLayer(_heatLayer);
+  // Un punto de calor por alerta VISIBLE (req.5: falsas/descartadas no pintan),
+  // ponderado por la confianza de detección.
+  const points = visibleAlerts()
+    .filter(a => a.lat != null && a.lon != null)
+    .map(a => [a.lat, a.lon, a.confidence || 0.5]);
   _heatLayer = L.heatLayer(points, {
     radius: 30,
     blur: 22,
@@ -75,14 +109,28 @@ function buildHeatLayer() {
   });
 }
 
+function _buildLegend() {
+  const legend = L.control({ position: 'bottomright' });
+  legend.onAdd = function () {
+    const div = L.DomUtil.create('div', 'map-legend');
+    div.innerHTML =
+      '<strong>Nivel de riesgo</strong>' +
+      ['bajo', 'medio', 'alto', 'critico'].map(l =>
+        `<div><span class="dot-legend" style="background:${RISK_COLOR[l]}"></span> ` +
+        `${RISK_EMOJI[l]} ${RISK_LABEL[l]}</div>`).join('');
+    return div;
+  };
+  return legend;
+}
+
 function setMapMode(mode) {
   _mapMode = mode;
   if (!_map) return;
   if (mode === 'calor') {
-    if (_markersLayer) _map.removeLayer(_markersLayer);
+    if (_markersLayer && _map.hasLayer(_markersLayer)) _map.removeLayer(_markersLayer);
     _heatLayer.addTo(_map);
   } else {
-    if (_heatLayer) _map.removeLayer(_heatLayer);
+    if (_heatLayer && _map.hasLayer(_heatLayer)) _map.removeLayer(_heatLayer);
     _markersLayer.addTo(_map);
   }
   // sincronizar botones del toggle
@@ -94,5 +142,7 @@ function setMapMode(mode) {
 /** Centra el mapa en un nodo concreto (se usa desde el detalle). */
 function focusNodeOnMap(nodeId) {
   const node = NODE_BY_ID[nodeId];
-  if (node && _map) _map.setView([node.lat, node.lon], 14, { animate: true });
+  if (node && _map && node.lat != null) {
+    _map.setView([node.lat, node.lon], 14, { animate: true });
+  }
 }
