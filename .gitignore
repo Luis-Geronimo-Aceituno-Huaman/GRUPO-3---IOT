@@ -1,7 +1,6 @@
-# Datos generados en tiempo de ejecucion (videos/clips y bases de datos)
-datos/
-*.webm
-*.mp4
+# Datos en tiempo de ejecucion: se versionan los clips (datos/clips/) y el
+# dump de PostgreSQL (datos/postgres_dump.sql); las bases SQLite legacy no
+datos/legacy_sqlite/
 
 # Python
 __pycache__/
